@@ -75,7 +75,11 @@ func (p *PODState) MinutesActive() uint16 {
 func (p *PODState) BolusRemaining() uint16 {
 	now := time.Now()
 	if p.BolusEnd.After(now) {
-		return uint16(p.BolusEnd.Sub(now).Seconds() / 2)
+		if p.PodProgress > response.PodProgressInsertingCannula {
+			return uint16(p.BolusEnd.Sub(now).Seconds()) / 2
+		} else {
+			return uint16(p.BolusEnd.Sub(now).Seconds()) // one sec/pulse during pod setup
+		}
 	} else {
 		return 0
 	}

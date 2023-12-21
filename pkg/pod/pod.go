@@ -214,7 +214,7 @@ func (p *Pod) CommandLoop(pMsg PodMsgBody) {
 			log.Exit(0)
 		}
 		log.Infof("pkg pod;   *** Waiting for the next command ***")
-		msg, didTimeout := p.ble.ReadMessageWithTimeout(1 * time.Minute)
+		msg, didTimeout := p.ble.ReadMessageWithTimeout(3 * time.Minute)
 		if didTimeout {
 			p.ble.ShutdownConnection()
 			go func() {
@@ -341,16 +341,14 @@ func (p *Pod) makeGeneralStatusResponse() response.Response {
 	log.Debugf("pkg pod; General status response LastProgSeqNum = %d", p.state.LastProgSeqNum)
 
 	var now = time.Now()
-	var tempBasalActive = p.state.TempBasalEnd.After(now)
 
 	return &response.GeneralStatusResponse{
-		Seq:                 0,
 		LastProgSeqNum:      p.state.LastProgSeqNum,
 		Reservoir:           p.state.Reservoir,
 		Alerts:              p.state.ActiveAlertSlots,
 		BolusActive:         p.state.BolusEnd.After(now),
-		TempBasalActive:     tempBasalActive,
-		BasalActive:         p.state.BasalActive && !tempBasalActive,
+		TempBasalActive:     p.state.TempBasalEnd.After(now),
+		BasalActive:         p.state.BasalActive,
 		ExtendedBolusActive: p.state.ExtendedBolusActive,
 		PodProgress:         p.state.PodProgress,
 		Delivered:           p.state.Delivered,
@@ -362,19 +360,18 @@ func (p *Pod) makeGeneralStatusResponse() response.Response {
 func (p *Pod) makeDetailedStatusResponse() response.Response {
 
 	var now = time.Now()
-	var tempBasalActive = p.state.TempBasalEnd.After(now)
 
 	return &response.DetailedStatusResponse{
-		Seq:                 0,
 		LastProgSeqNum:      p.state.LastProgSeqNum,
 		Reservoir:           p.state.Reservoir,
 		Alerts:              p.state.ActiveAlertSlots,
 		BolusActive:         p.state.BolusEnd.After(now),
-		TempBasalActive:     tempBasalActive,
-		BasalActive:         p.state.BasalActive && !tempBasalActive,
+		TempBasalActive:     p.state.TempBasalEnd.After(now),
+		BasalActive:         p.state.BasalActive,
 		ExtendedBolusActive: p.state.ExtendedBolusActive,
 		PodProgress:         p.state.PodProgress,
 		Delivered:           p.state.Delivered,
+		BolusRemaining:      p.state.BolusRemaining(),
 		MinutesActive:       p.state.MinutesActive(),
 		FaultEvent:          p.state.FaultEvent,
 		FaultEventTime:      p.state.FaultTime,
@@ -395,15 +392,15 @@ func (p *Pod) getResponse(cmd command.Command) response.Response {
 }
 
 func (p *Pod) handleCommand(cmd command.Command) {
+	if crashBeforeProcessingCommand && cmd.DoesMutatePodState() {
+		log.Fatalf("pkg pod; Crashing before processing command with sequence %d", cmd.GetSeq())
+	}
 	switch c := cmd.(type) {
 	case *command.GetVersion:
 		p.state.PodProgress = response.PodProgressReminderInitialized
 	case *command.SetUniqueID:
 		p.state.PodProgress = response.PodProgressPairingCompleted
 	case *command.ProgramInsulin:
-		if crashBeforeProcessingCommand {
-			log.Fatalf("pkg pod; Crashing before processing command with sequence %d", c.GetSeq())
-		}
 		log.Debugf("pkg pod; ProgramInsulin: PodProgress = %d", p.state.PodProgress)
 
 		if p.state.PodProgress < response.PodProgressPriming {
@@ -434,16 +431,17 @@ func (p *Pod) handleCommand(cmd command.Command) {
 		if c.TableNum == 2 {
 			p.state.Delivered += c.Pulses
 			p.state.Reservoir -= c.Pulses
-			p.state.BolusEnd = time.Now().Add(time.Duration(c.Pulses) * time.Second * 2)
-		}
-
-		if crashAfterProcessingCommand {
-			p.state.LastProgSeqNum = cmd.GetSeq() // Normally this happens below, but we do it here in this special case
-			p.state.Save()
-			log.Fatalf("pkg pod; Crashing after processing command with sequence %d", c.GetSeq())
+			if p.state.PodProgress > response.PodProgressInsertingCannula {
+				p.state.BolusEnd = time.Now().Add(time.Duration(c.Pulses) * time.Second * 2)
+			} else {
+				p.state.BolusEnd = time.Now().Add(time.Duration(c.Pulses) * time.Second) // one sec/pulse during pod setup
+			}
 		}
 
 	case *command.GetStatus:
+		if p.state.PodProgress == response.PodProgressPriming {
+			p.state.PodProgress = response.PodProgressPrimingCompleted
+		}
 		if p.state.PodProgress == response.PodProgressInsertingCannula {
 			p.state.PodProgress = response.PodProgressRunningAbove50U
 		}
@@ -463,8 +461,13 @@ func (p *Pod) handleCommand(cmd command.Command) {
 		// No action
 	}
 	if cmd.DoesMutatePodState() {
-		log.Debugf("pkg pod; Updating LastProgSeqNum = %d", cmd.GetSeq())
-		p.state.LastProgSeqNum = cmd.GetSeq()
+		seq := cmd.GetSeq()
+		log.Debugf("pkg pod; Updating LastProgSeqNum = %d", seq)
+		p.state.LastProgSeqNum = seq
+		if crashAfterProcessingCommand {
+			p.state.Save()
+			log.Fatalf("pkg pod; Crashing after processing command with sequence %d", seq)
+		}
 	}
 }
 

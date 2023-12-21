@@ -43,7 +43,6 @@ const (
 )
 
 type GeneralStatusResponse struct {
-	Seq                 uint16
 	Alerts              uint8
 	BolusActive         bool
 	TempBasalActive     bool
@@ -61,23 +60,22 @@ type GeneralStatusResponse struct {
 func (r *GeneralStatusResponse) Marshal() ([]byte, error) {
 	response, _ := hex.DecodeString("1D1800A02800000463FF") // Default
 
-	// Delivery bits
-	response[1] = response[1] & 0b1111
+	// PodProgress returned in low nibble
+	response[1] = byte(r.PodProgress) & 0b1111
+
+	// Delivery bits returned in upper nibble
 	if r.ExtendedBolusActive {
-		response[1] = response[1] | (1 << 7)
-	}
-	if r.BolusActive {
-		response[1] = response[1] | (1 << 6)
+		// extended bolus bit exclusive of bolus active bit
+		response[1] |= 0b1000 << 4
+	} else if r.BolusActive {
+		response[1] |= 0b0100 << 4
 	}
 	if r.TempBasalActive {
-		response[1] = response[1] | (1 << 5)
+		// temp basal active bit exclusive of basal active bit
+		response[1] |= 0b0010 << 4
+	} else if r.BasalActive {
+		response[1] |= 0b0001 << 4
 	}
-	if r.BasalActive {
-		response[1] = response[1] | (1 << 4)
-	}
-
-	// PodProgress
-	response[1] = response[1]&0b11110000 | (byte(r.PodProgress) & 0b1111)
 
 	// Total insulin delivered
 	response[2] = byte(r.Delivered >> 9)
@@ -99,7 +97,7 @@ func (r *GeneralStatusResponse) Marshal() ([]byte, error) {
 	response[7] = response[7]&0b10000000 | uint8((r.MinutesActive>>6)&0b01111111)
 	response[8] = response[8]&0b00000011 | uint8((r.MinutesActive<<2)&0b11111100)
 
-	if r.Reservoir < (50 / 0.05) {
+	if r.Reservoir <= (50 / 0.05) {
 		response[8] = response[8]&0b11111100 | uint8(r.Reservoir>>8)
 		response[9] = uint8(r.Reservoir & 0xff)
 	} else {

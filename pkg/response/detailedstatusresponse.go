@@ -5,7 +5,8 @@ import (
 )
 
 type DetailedStatusResponse struct {
-	Seq                 uint16
+	LastProgSeqNum      uint8
+	Reservoir           uint16
 	Alerts              uint8
 	BolusActive         bool
 	TempBasalActive     bool
@@ -14,10 +15,7 @@ type DetailedStatusResponse struct {
 	PodProgress         PodProgress
 	Delivered           uint16
 	BolusRemaining      uint16
-	IsFaulted           bool
 	MinutesActive       uint16
-	Reservoir           uint16
-	LastProgSeqNum      uint8
 	FaultEvent          uint8
 	FaultEventTime      uint16
 }
@@ -26,25 +24,30 @@ func (r *DetailedStatusResponse) Marshal() ([]byte, error) {
 
 	// OFF 1  2  3  4  5 6  7  8 9 10 1112 1314 1516 17 18 19 20 21 2223
 	// 02 16 02 0J 0K LLLL MM NNNN PP QQQQ RRRR SSSS TT UU VV WW XX YYYY
-	// 02 16 02 08 02 0000 00 01b2 00 0000 03ff 01cc 00 00 00 1f ff 030d
+	// 02 16 02 08 02 0000 00 01b2 00 0000 03ff 01cc 00 00 00 00 00 0000
 
-	response, _ := hex.DecodeString("021602000000000001b200000003ff01cc0000001fff030d")
+	response, _ := hex.DecodeString("021602080200000001b200000003ff01cc00000000000000")
 
 	// PodProgress
-	response[3] = byte(r.PodProgress)
+	if r.FaultEvent == 0 {
+		response[3] = byte(r.PodProgress)
+	} else {
+		response[3] = PodProgressFault
+	}
 
 	// Delivery bits
-	if r.BasalActive {
-		response[4] = response[4] | (1 << 0)
+	response[4] = 0 // suspended
+	if r.ExtendedBolusActive {
+		// extended bolus bit exclusive of bolus active bit
+		response[4] |= 0b1000
+	} else if r.BolusActive {
+		response[4] |= 0b0100
 	}
 	if r.TempBasalActive {
-		response[4] = response[4] | (1 << 1)
-	}
-	if r.BolusActive {
-		response[4] = response[4] | (1 << 2)
-	}
-	if r.ExtendedBolusActive {
-		response[4] = response[4] | (1 << 3)
+		// temp basal active bit exclusive of basal active bit
+		response[4] |= 0b0010
+	} else if r.BasalActive {
+		response[4] |= 0b0001
 	}
 
 	// Bolus remaining pulses
@@ -66,7 +69,7 @@ func (r *DetailedStatusResponse) Marshal() ([]byte, error) {
 	response[12] = byte(r.FaultEventTime & 0xff)
 
 	// Reservoir
-	if r.Reservoir < (50 / 0.05) {
+	if r.Reservoir <= (50 / 0.05) {
 		response[13] = byte(r.Reservoir >> 8)
 		response[14] = byte(r.Reservoir & 0xff)
 	} else {
@@ -79,9 +82,15 @@ func (r *DetailedStatusResponse) Marshal() ([]byte, error) {
 	response[16] = byte(r.MinutesActive & 0xff)
 
 	// Set active alert slot bits
-	response[6] = r.Alerts
+	response[17] = r.Alerts
 
-	// TODO: add other fault details
+	if r.FaultEvent != 0 {
+		// previous PodProgress returned in low nibble of VV byte
+		response[19] = byte(r.PodProgress) & 0b1111
+		if r.BolusActive {
+			response[19] |= 0b00010000
+		}
+	}
 
 	return response, nil
 }
